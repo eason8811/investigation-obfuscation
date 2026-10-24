@@ -1,0 +1,59 @@
+# Dependencies
+node_modules/
+
+# Package manager caches (keep lockfiles under version control)
+.npm/
+.pnpm-store/
+.yarn/cache/
+.yarn/unplugged/
+.yarn/build-state.yml
+.yarn/install-state.gz
+.pnp.*
+
+# Build output
+dist/
+build/
+out/
+*.tsbuildinfo
+
+# Test and coverage output
+coverage/
+.nyc_output/
+
+# Logs and diagnostic output
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+report.*.json
+*.pid
+*.pid.lock
+
+# Local caches and temporary files
+.cache/
+.eslintcache
+.stylelintcache
+.node_repl_history
+tmp/
+temp/
+
+# Local environment variables and secrets
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+
+# IDEs: WebStorm / IntelliJ IDEA / VSCode
+.idea/
+/.idea/
+*.iml
+.vscode/
+.history/
+
+# OS-generated files
+.DS_Store
+Thumbs.db
+Desktop.ini

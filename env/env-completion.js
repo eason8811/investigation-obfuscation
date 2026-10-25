@@ -1,3 +1,9 @@
+import {webcrypto} from "node:crypto";
+import {LocalStorage} from './env-localStorage.js'
+
+const NativeCrypto = webcrypto;
+const NativeSubtleCrypto = webcrypto.subtle;
+
 /**
  * 根据属性快照创建可监控的环境对象。
  *
@@ -12,39 +18,55 @@
  * @param {boolean} [options.logEnumerations=false] 是否记录属性枚举
  * @returns {object}
  */
-function createObject(keys = [], implementations = {}, options = {}) {
+export function createObject(keys = [], implementations = {}, options = {}) {
     const {
         label = "Object",
+        native = null,
         selfReferences = [],
         logReads = true,
         logWrites = true,
         logMissing = true,
-        logEnumerations = false
+        logEnumerations = false,
+        logSymbols = false
     } = options;
 
-    const target = {};
+    // 使用原生对象的原型，但创建独立的目标对象
+    const target = native == null
+        ? {}
+        : Object.create(Object.getPrototypeOf(native));
 
-    // 快照中声明的属性
     const declared = new Set(keys);
 
-    // 已实现的属性
-    const entries = Object.entries(implementations);
-    const values = new Map(entries);
-    const implemented = new Set(values.keys());
+    // 同时支持字符串键和 Symbol 键
+    const implemented = new Map(
+        Reflect.ownKeys(implementations).map(key => [
+            key,
+            implementations[key]
+        ])
+    );
 
-    // 1. 根据快照创建可枚举属性
+    const hasOwn = (obj, key) =>
+        Object.prototype.hasOwnProperty.call(obj, key);
+
+    const nativeHas = key =>
+        native != null && Reflect.has(native, key);
+
+    // 缓存绑定后的原生方法，避免每次读取创建新函数
+    const boundFunctions = new Map();
+
+    // 创建快照中的可枚举属性
     for (const key of declared) {
         Object.defineProperty(target, key, {
-            value: values.get(key),
+            value: implemented.get(key),
             enumerable: true,
             writable: true,
             configurable: true
         });
     }
 
-    // 2. 已实现但不在快照中的属性，默认不可枚举
-    for (const [key, value] of entries) {
-        if (declared.has(key)) {
+    // 添加未包含在快照中的手动实现
+    for (const [key, value] of implemented) {
+        if (declared.has(key) || nativeHas(key)) {
             continue;
         }
 
@@ -56,104 +78,163 @@ function createObject(keys = [], implementations = {}, options = {}) {
         });
     }
 
-    // 3. 使用 Proxy 监控对象操作
-    const result = new Proxy(target, {
+    // 从 Node 原生对象读取属性
+    function getNativeValue(key) {
+        const value = Reflect.get(native, key, native);
+
+        if (typeof value !== "function" || key === "constructor") {
+            return value;
+        }
+
+        const cached = boundFunctions.get(key);
+
+        if (cached && cached.original === value) {
+            return cached.bound;
+        }
+
+        const bound = value.bind(native);
+
+        boundFunctions.set(key, {
+            original: value,
+            bound
+        });
+
+        return bound;
+    }
+
+    function printLog(action, key, value, source = "") {
+        if (typeof key === "symbol" && !logSymbols) {
+            return;
+        }
+
+        const sourceLabel = source ? ` [${source}]` : "";
+
+        console.log(
+            `[${label}] ${action}${sourceLabel}: ${String(key)}`
+        );
+
+        console.dir(value);
+    }
+
+    const proxy = new Proxy(target, {
         get(target, key, receiver) {
-            const value = Reflect.get(target, key, receiver);
+            let source;
+            let value;
 
-            // 默认忽略 Symbol 属性的读取日志
-            if (typeof key === "string") {
-                const missing =
-                    !Reflect.has(target, key) ||
-                    (declared.has(key) && !implemented.has(key));
+            if (implemented.has(key)) {
+                source = "implementation";
+                value = implemented.get(key);
+            } else if (nativeHas(key)) {
+                source = "native";
+                value = getNativeValue(key);
+            } else if (Reflect.has(target, key)) {
+                source = "prototype";
+                value = Reflect.get(target, key, receiver);
+            } else {
+                source = "missing";
+                value = undefined;
+            }
 
-                if (missing) {
-                    if (logMissing) {
-                        console.warn(
-                            `[${label}] 未实现属性读取: ${key}`
-                        );
-                    }
-                } else if (logReads) {
-                    console.log(
-                        `[${label}] 读取了属性: ${key}, 取值为:`
+            const missing =
+                source === "missing" ||
+                (source === "prototype" && declared.has(key));
+
+            if (missing) {
+                if (logMissing &&
+                    (typeof key !== "symbol" || logSymbols)) {
+                    console.warn(
+                        `[${label}] 未实现属性读取: ${String(key)}`
                     );
-                    console.dir(value);
                 }
+            } else if (logReads) {
+                printLog("读取属性", key, value, source);
             }
 
             return value;
         },
 
-        set(target, key, value, receiver) {
-            const success = Reflect.set(
-                target,
-                key,
-                value,
-                receiver
-            );
-
-            if (success) {
-                implemented.add(key);
-
-                if (logWrites) {
-                    console.log(
-                        `[${label}] 设置了属性: ${String(key)}, 取值为:`
-                    );
-                    console.dir(value);
-                }
+        set(target, key, value) {
+            if (hasOwn(target, key)) {
+                Reflect.set(target, key, value, target);
+            } else {
+                Object.defineProperty(target, key, {
+                    value,
+                    writable: true,
+                    configurable: true,
+                    enumerable: declared.has(key) || !nativeHas(key)
+                });
             }
 
-            return success;
+            implemented.set(key, value);
+
+            if (logWrites) {
+                printLog("设置属性", key, value);
+            }
+
+            return true;
+        },
+
+        has(target, key) {
+            return (
+                implemented.has(key) ||
+                nativeHas(key) ||
+                Reflect.has(target, key)
+            );
         },
 
         ownKeys(target) {
             if (logEnumerations) {
-                console.log(
-                    `[${label}] 正在枚举对象属性`
-                );
+                console.log(`[${label}] 枚举对象属性`);
             }
 
             return Reflect.ownKeys(target);
         }
     });
 
-    // 4. 处理自引用属性
+    // 处理自引用
     for (const key of selfReferences) {
-        if (Object.prototype.hasOwnProperty.call(target, key)) {
-            target[key] = result;
+        implemented.set(key, proxy);
+
+        if (hasOwn(target, key)) {
+            Reflect.set(target, key, proxy, target);
         } else {
             Object.defineProperty(target, key, {
-                value: result,
-                enumerable: declared.has(key),
+                value: proxy,
                 writable: true,
-                configurable: true
+                configurable: true,
+                enumerable: declared.has(key)
             });
         }
-
-        implemented.add(key);
     }
 
-    return result;
+    return proxy;
 }
 
-let SubtleCrypto = createObject(["supports"], {}, {label: "SubtleCrypto"});
-
-let Crypto = createObject([], {subtle: SubtleCrypto}, {label: "Crypto"});
-
-let localStorageKeys = ["__cuid", "volume", "rweb.recentUserIds"];
-let LocalStorage = createObject(
-    localStorageKeys,
+const SubtleCrypto = createObject(
+    ["supports"],
+    {},
     {
-        "__cuid": "16c4f5b3-619c-4dad-b691-fb8712c1c250",
-        "volume": "1",
-        "rweb.recentUserIds": "AJDbOkpFjxo",
-        getItem: (key) => {
-            return LocalStorage[key];
-        },
+        label: "SubtleCrypto",
+        native: NativeSubtleCrypto,
+        logReads: true,
+        logMissing: true,
+        logWrites: true
+    }
+);
 
+const Crypto = createObject(
+    [],
+    {
+        subtle: SubtleCrypto
     },
-    {label: "LocalStorage"}
-)
+    {
+        label: "Crypto",
+        native: NativeCrypto,
+        logReads: true,
+        logMissing: true,
+        logWrites: true
+    }
+);
 
 let documentKeys = ["location", "__reactContainer$ja09zrggtkr", "_reactListeningnwd5d2ndxqe", "__sentry_instrumentation_handlers__", "__reactResources$ja09zrggtkr"]
 let Document = createObject(
@@ -201,7 +282,8 @@ const Window = createObject(
         navigator: Navigator,
         crypto: Crypto,
         localStorage: LocalStorage,
-        Error: Error
+        Error: Error,
+        Object: Object
     },
     {
         label: "Window",

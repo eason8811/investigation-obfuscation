@@ -8,7 +8,7 @@ const input = resolve(
 );
 
 const output = resolve(
-    process.argv[3] ?? 'deobfus/01-webcrack.js'
+    process.argv[3] ?? 'deobfus/castle-webcrack.js'
 );
 
 if (input === output) {

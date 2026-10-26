@@ -1,6 +1,7 @@
 import {webcrypto} from "node:crypto";
 import {LocalStorage} from './env-localStorage.js'
 import {createPdfPluginEnvironment} from "./env-plugins.mjs";
+import {createBrowserPerformance} from "./env-performance.mjs";
 
 const NativeCrypto = webcrypto;
 const NativeSubtleCrypto = webcrypto.subtle;
@@ -8,13 +9,70 @@ const {
     plugins,
     mimeTypes,
     pdfViewerEnabled,
-    constructors
+    constructors: PluginConstructors
 } = createPdfPluginEnvironment({
     log: true
 });
 
+const snapshot = {
+    timeOrigin: Date.now() - 500,
+
+    memory: {
+        jsHeapSizeLimit: 4395630592,
+        totalJSHeapSize: 72079861,
+        usedJSHeapSize: 70222897
+    },
+
+    timing: {
+        connectStart: 1792402479262,
+        secureConnectionStart: 1792402479263,
+        unloadEventEnd: 1792402480180,
+        domainLookupStart: 1792402479259,
+        domainLookupEnd: 1792402479259,
+        responseStart: 1792402480107,
+        connectEnd: 1792402479721,
+        responseEnd: 1792402480127,
+        requestStart: 1792402479721,
+        domLoading: 1792402480189,
+        redirectStart: 0,
+        loadEventEnd: 1792402481365,
+        domComplete: 1792402481365,
+        navigationStart: 1792402479249,
+        loadEventStart: 1792402481365,
+        domContentLoadedEventEnd: 1792402480539,
+        unloadEventStart: 1792402480180,
+        redirectEnd: 0,
+        domInteractive: 1792402480539,
+        fetchStart: 1792402479259,
+        domContentLoadedEventStart: 1792402480539
+    },
+
+    navigation: {
+        type: 0,
+        redirectCount: 0
+    },
+
+    interactionCount: 73
+};
+
+const {
+    performance: Performance,
+    constructors: PerformanceConstructors
+} = createBrowserPerformance({
+    timeOrigin: snapshot.timeOrigin,
+    memorySnapshot: snapshot.memory,
+    memoryMode: "node",
+
+    timingSnapshot: snapshot.timing,
+    navigationSnapshot: snapshot.navigation,
+
+    interactionCount: snapshot.interactionCount,
+
+    log: true
+});
+
 /**
- * 根据属性快照创建可监控的环境对象。
+ * 根据属性快照创建可监控的环境对象
  *
  * @param {string[]} keys 对象的可枚举属性名，例如 Object.keys(window) 的结果
  * @param {object} implementations 已实现属性及其对应值
@@ -335,11 +393,13 @@ const Window = createObject(
         navigator: Navigator,
         crypto: Crypto,
         localStorage: LocalStorage,
+        performance: Performance,
         Error: Error,
         Object: Object,
         HTMLMediaElement: HTMLMediaElement,
 
-        ...constructors
+        ...PluginConstructors,
+        ...PerformanceConstructors
     },
     {
         label: "Window",

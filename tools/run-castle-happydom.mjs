@@ -5,7 +5,8 @@ import {
 
 import {
     monitorMethod,
-    monitorLifecycle
+    monitorLifecycle,
+    printMonitorSummary
 } from "../env/env-monitor.mjs";
 
 import {
@@ -56,6 +57,10 @@ monitorLifecycle(browserWindow);
 // 4. 安装方法调用监控
 // ========================================
 
+// 创建 testCanvas
+const testCanvas = browserDocument.createElement("canvas");
+const testContext = testCanvas.getContext("2d");
+
 monitorMethod(
     browserWindow,
     "addEventListener",
@@ -64,50 +69,122 @@ monitorMethod(
 
 monitorMethod(
     browserWindow,
-    "removeEventListener",
-    "Window"
+    "addEventListener",
+    "Window",
+    {
+        args: "first",
+        result: false,
+        traceFirst: 0
+    }
 );
 
 monitorMethod(
     browserDocument,
     "addEventListener",
-    "Document"
+    "Document",
+    {
+        args: "first",
+        result: false,
+        traceFirst: 0
+    }
 );
 
 monitorMethod(
     browserDocument,
     "removeEventListener",
-    "Document"
+    "Document",
+    {
+        args: "first",
+        result: false,
+        traceFirst: 0
+    }
 );
 
 monitorMethod(
     browserDocument,
     "createElement",
-    "Document"
+    "Document",
+    {
+        args: "first",
+        result: true,
+        traceFirst: 2,
+        maxLogs: 20
+    }
 );
 
-const CanvasPrototype = browserWindow.HTMLCanvasElement?.prototype;
+const CanvasPrototype =
+    browserWindow.HTMLCanvasElement?.prototype;
 
 if (CanvasPrototype) {
     monitorMethod(
         CanvasPrototype,
         "getContext",
-        "HTMLCanvasElement"
+        "HTMLCanvasElement",
+        {
+            args: "all",
+            result: true,
+            traceFirst: 4,
+            maxLogs: 20
+        }
     );
 
     monitorMethod(
         CanvasPrototype,
         "toDataURL",
-        "HTMLCanvasElement"
+        "HTMLCanvasElement",
+        {
+            args: "all",
+            result: true,
+            traceFirst: 2,
+            maxLogs: 10
+        }
     );
 
     monitorMethod(
         CanvasPrototype,
         "toBlob",
-        "HTMLCanvasElement"
+        "HTMLCanvasElement",
+        {
+            args: "all",
+            result: false,
+            traceFirst: 1,
+            maxLogs: 10
+        }
     );
 }
 
+if (testContext) {
+    const contextPrototype =
+        Object.getPrototypeOf(testContext);
+
+    const methods = [
+        "fillText",
+        "strokeText",
+        "measureText",
+        "fillRect",
+        "strokeRect",
+        "clearRect",
+        "getImageData",
+        "putImageData",
+        "drawImage"
+    ];
+
+    for (const methodName of methods) {
+        monitorMethod(
+            contextPrototype,
+            methodName,
+            "CanvasRenderingContext2D",
+            {
+                args: "all",
+                result: methodName === "measureText" ||
+                    methodName === "getImageData",
+
+                traceFirst: 0,
+                maxLogs: 20
+            }
+        );
+    }
+}
 
 // ========================================
 // 5. 导入 Castle SDK
@@ -172,6 +249,8 @@ if (sdkModule !== undefined) {
     console.log(
         "[Castle:HappyDOM] Observation finished"
     );
+
+    printMonitorSummary();
 }
 
 

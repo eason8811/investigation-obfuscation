@@ -1,5 +1,6 @@
-import { Window } from '../env/env-completion.js';
+import { Window, Document } from '../env/env-completion.js';
 let window = Window;
+let document = Document;
 // =============================== env ===============================
 
 (function () {

@@ -64,12 +64,6 @@ const testContext = testCanvas.getContext("2d");
 monitorMethod(
     browserWindow,
     "addEventListener",
-    "Window"
-);
-
-monitorMethod(
-    browserWindow,
-    "addEventListener",
     "Window",
     {
         args: "first",

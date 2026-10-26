@@ -1,8 +1,17 @@
 import {webcrypto} from "node:crypto";
 import {LocalStorage} from './env-localStorage.js'
+import {createPdfPluginEnvironment} from "./env-plugins.mjs";
 
 const NativeCrypto = webcrypto;
 const NativeSubtleCrypto = webcrypto.subtle;
+const {
+    plugins,
+    mimeTypes,
+    pdfViewerEnabled,
+    constructors
+} = createPdfPluginEnvironment({
+    log: true
+});
 
 /**
  * 根据属性快照创建可监控的环境对象。
@@ -210,6 +219,40 @@ export function createObject(keys = [], implementations = {}, options = {}) {
     return proxy;
 }
 
+// ================================================== Functioon ==================================================
+
+function HTMLMediaElement() {
+    throw new TypeError("Illegal constructor");
+}
+
+HTMLMediaElement.prototype.canPlayType = function (type) {
+    console.log("[HTMLMediaElement] canPlayType 调用:", type);
+
+    // 尚未实现格式支持判断
+    return "";
+};
+
+HTMLMediaElement.prototype.play = function () {
+    console.log("[HTMLMediaElement] play 调用");
+    return Promise.resolve();
+};
+
+HTMLMediaElement.prototype.pause = function () {
+    console.log("[HTMLMediaElement] pause 调用");
+};
+
+Object.defineProperty(
+    HTMLMediaElement.prototype,
+    Symbol.toStringTag,
+    {
+        value: "HTMLMediaElement",
+        configurable: true
+    }
+);
+
+// ================================================== Object ==================================================
+
+
 const SubtleCrypto = createObject(
     ["supports"],
     {},
@@ -271,7 +314,17 @@ let Location = createObject(
 );
 
 
-let Navigator = createObject([], {}, {label: "Navigator"});
+let Navigator = createObject(
+    [],
+    {
+        plugins,
+        mimeTypes,
+        pdfViewerEnabled
+    },
+    {
+        label: "Navigator"
+    }
+);
 
 const windowKeys = ["0", "1", "window", "self", "document", "name", "location", "customElements", "history", "navigation", "locationbar", "menubar", "personalbar", "scrollbars", "statusbar", "toolbar", "status", "closed", "frames", "length", "top", "opener", "parent", "frameElement", "navigator", "origin", "external", "screen", "innerWidth", "innerHeight", "scrollX", "pageXOffset", "scrollY", "pageYOffset", "visualViewport", "screenX", "screenY", "outerWidth", "outerHeight", "devicePixelRatio", "onpagereveal", "event", "clientInformation", "screenLeft", "screenTop", "styleMedia", "onsearch", "onappinstalled", "onbeforeinstallprompt", "onabort", "onbeforeinput", "onbeforematch", "onbeforetoggle", "onblur", "oncancel", "oncanplay", "oncanplaythrough", "onchange", "onclick", "onclose", "oncommand", "oncontentvisibilityautostatechange", "oncontextlost", "oncontextmenu", "oncontextrestored", "oncuechange", "ondblclick", "ondrag", "ondragend", "ondragenter", "ondragleave", "ondragover", "ondragstart", "ondrop", "ondurationchange", "onemptied", "onended", "onerror", "onfocus", "onformdata", "oninput", "oninvalid", "onkeydown", "onkeypress", "onkeyup", "onload", "onloadeddata", "onloadedmetadata", "onloadstart", "onmousedown", "onmouseenter", "onmouseleave", "onmousemove", "onmouseout", "onmouseover", "onmouseup", "onmousewheel", "onpause", "onplay", "onplaying", "onprogress", "onratechange", "onreset", "onresize", "onscroll", "onscrollend", "onsecuritypolicyviolation", "onseeked", "onseeking", "onselect", "onslotchange", "onstalled", "onsubmit", "onsuspend", "ontimeupdate", "ontoggle", "onvolumechange", "onwaiting", "onwebkitanimationend", "onwebkitanimationiteration", "onwebkitanimationstart", "onwebkittransitionend", "onwheel", "onauxclick", "ongotpointercapture", "onlostpointercapture", "onpointerdown", "onpointermove", "onpointerup", "onpointercancel", "onpointerover", "onpointerout", "onpointerenter", "onpointerleave", "onselectstart", "onselectionchange", "onanimationcancel", "onanimationend", "onanimationiteration", "onanimationstart", "ontransitionrun", "ontransitionstart", "ontransitionend", "ontransitioncancel", "onbeforexrselect", "onafterprint", "onbeforeprint", "onbeforeunload", "onhashchange", "onlanguagechange", "onmessage", "onmessageerror", "onoffline", "ononline", "onpagehide", "onpageshow", "onpopstate", "onrejectionhandled", "onstorage", "onunhandledrejection", "onunload", "isSecureContext", "crossOriginIsolated", "scheduler", "performance", "trustedTypes", "crypto", "indexedDB", "localStorage", "sessionStorage", "alert", "atob", "blur", "btoa", "cancelAnimationFrame", "cancelIdleCallback", "captureEvents", "clearInterval", "clearTimeout", "close", "confirm", "createImageBitmap", "fetch", "find", "focus", "getComputedStyle", "getSelection", "matchMedia", "moveBy", "moveTo", "open", "postMessage", "print", "prompt", "queueMicrotask", "releaseEvents", "reportError", "requestAnimationFrame", "requestIdleCallback", "resizeBy", "resizeTo", "scroll", "scrollBy", "scrollTo", "setInterval", "setTimeout", "stop", "structuredClone", "webkitCancelAnimationFrame", "webkitRequestAnimationFrame", "chrome", "crashReport", "cookieStore", "ondevicemotion", "ondeviceorientation", "ondeviceorientationabsolute", "onpointerrawupdate", "caches", "documentPictureInPicture", "fetchLater", "getScreenDetails", "queryLocalFonts", "showDirectoryPicker", "showOpenFilePicker", "showSaveFilePicker", "originAgentCluster", "viewport", "onpageswap", "credentialless", "fence", "launchQueue", "speechSynthesis", "onscrollsnapchange", "onscrollsnapchanging", "ongamepadconnected", "ongamepaddisconnected", "requestResize", "webkitRequestFileSystem", "webkitResolveLocalFileSystemURL", "__VUE_DEVTOOLS_COMPONENT_INSPECTOR_ENABLED__", "__VUE_DEVTOOLS_KIT_TIMELINE_LAYERS", "__VUE_DEVTOOLS_KIT_INSPECTOR__", "__VUE_DEVTOOLS_KIT_APP_RECORDS__", "__VUE_DEVTOOLS_KIT_ACTIVE_APP_RECORD__", "__VUE_DEVTOOLS_KIT_ACTIVE_APP_RECORD_ID__", "__VUE_DEVTOOLS_KIT_CUSTOM_TABS__", "__VUE_DEVTOOLS_KIT_CUSTOM_COMMANDS__", "__VUE_DEVTOOLS_KIT_GLOBAL_STATE__", "__VUE_DEVTOOLS_KIT_PLUGIN_BUFFER__", "__VUE_DEVTOOLS_HOOK", "__VUE_DEVTOOLS_KIT__REGISTERED_PLUGIN_APPS__", "__VUE_DEVTOOLS_ROUTER_INFO__", "__VUE_DEVTOOLS_ROUTER__", "__VUE_DEVTOOLS_ENV__", "__VUE_DEVTOOLS_KIT_CONTEXT__", "__VUE_DEVTOOLS_NEXT_APP_RECORD_INFO__", "__VUE_DEVTOOLS_UPDATE_CLIENT_DETECTED__", "__VUE_DEVTOOLS_KIT_MESSAGE_CHANNELS__", "__VUE_DEVTOOLS_KIT_RPC_CLIENT__", "__VUE_DEVTOOLS_KIT_RPC_SERVER__", "__VUE_DEVTOOLS_KIT_VITE_RPC_CLIENT__", "__VUE_DEVTOOLS_KIT_VITE_RPC_SERVER__", "__VUE_DEVTOOLS_KIT_BROADCAST_RPC_SERVER__", "__VUE_DEVTOOLS_BROWSER_EXTENSION_DETECTED__", "__xClientTextFormatters", "__INITIAL_DATA__", "$R", "_sentryDebugIds", "_sentryDebugIdIdentifier", "__SENTRY__", "__sentry_instrumentation_handlers__", "_sentryWrappedDepth", "__REACT_DEVTOOLS_BACKEND_MANAGER_INJECTED__", "AppleID", "default_gsi", "_F_toggles_default_gsi", "google", "__G_ID_CLIENT__", "closure_lm_734508"];
 const Window = createObject(
@@ -283,7 +336,10 @@ const Window = createObject(
         crypto: Crypto,
         localStorage: LocalStorage,
         Error: Error,
-        Object: Object
+        Object: Object,
+        HTMLMediaElement: HTMLMediaElement,
+
+        ...constructors
     },
     {
         label: "Window",

@@ -1,8 +1,3 @@
-import { Window, Document } from '../env/env-completion.js';
-let window = Window;
-let document = Document;
-// =============================== env ===============================
-
 (function () {
   try {
     var e = typeof window < `u` ? window : typeof global < `u` ? global : typeof globalThis < `u` ? globalThis : typeof self < `u` ? self : {};

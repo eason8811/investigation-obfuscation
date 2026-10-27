@@ -296,6 +296,7 @@ if (testContext) {
 
 let sdkModule;
 let sdk;
+let tokenSdk;
 let configured = false;
 
 try {
@@ -353,10 +354,31 @@ try {
       );
     }
 
-    await trace.stage("configure", async () => {
-      return sdk.configure({
+    const configuredSdk = await trace.stage(
+      "configure",
+      () => sdk.configure({
         pk: options.publicKey
-      });
+      })
+    );
+
+    const hasConfiguredTokenAPI = typeof configuredSdk?.createRequestToken === "function";
+
+    // 记录 configure() 的实际返回类型
+    trace.emit("sdk.configure.return", {
+      returnedType: typeof configuredSdk,
+      isNull: configuredSdk === null,
+      isUndefined: configuredSdk === undefined,
+      isSameInstance: configuredSdk === sdk,
+      hasCreateRequestToken: hasConfiguredTokenAPI
+    });
+
+    // 优先使用 configure 返回的实例
+    tokenSdk = hasConfiguredTokenAPI ? configuredSdk : sdk;
+
+    trace.emit("sdk.tokenApi.selected", {
+      source: hasConfiguredTokenAPI
+        ? "configure-return"
+        : "module-default"
     });
 
     configured = true;
@@ -386,30 +408,34 @@ try {
   // ========================================
 
   if (options.mode === "token") {
-    const token = await trace.stage(
-      "createRequestToken",
-      () => withTimeout(
-        () => sdk.createRequestToken(),
-        options.tokenTimeoutMs
-      )
-    );
+    try {
+      const token = await trace.stage(
+        "createRequestToken",
+        () => withTimeout(
+          () => tokenSdk.createRequestToken(),
+          options.tokenTimeoutMs
+        )
+      );
 
-    const result = {
-      configureCompleted: configured,
-      returnedType: typeof token,
-      returnedNull: token === null,
-      length: typeof token === "string"
-        ? token.length
-        : undefined
-    };
+      const result = {
+        configureCompleted: configured,
+        returnedType: typeof token,
+        returnedNull: token === null,
+        length: typeof token === "string"
+          ? token.length
+          : undefined
+      };
 
-    trace.emit("token.result", result);
+      trace.emit("token.result", result);
 
-    await trace.stage("observe.token", async () => {
-      await delay(options.postTokenObserveMs);
-    });
+      console.log("[Castle] Token 生成诊断:", result);
 
-    console.log("[Castle] Token 生成诊断:", result);
+    } finally {
+      // 无论 Token 成功还是失败，都继续观察
+      await trace.stage("observe.token", async () => {
+        await delay(options.postTokenObserveMs);
+      });
+    }
   }
 
 } catch (error) {

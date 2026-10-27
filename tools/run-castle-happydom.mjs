@@ -20,6 +20,7 @@ import {
 import {resolve} from "node:path";
 import {pathToFileURL, fileURLToPath} from "node:url";
 import {createTrace} from "../env/env-trace.mjs";
+import {appendFileSync} from "node:fs";
 
 const projectRoot = fileURLToPath(
   new URL("../", import.meta.url)
@@ -56,6 +57,10 @@ const options = {
   // import | configure | token
   mode: process.env.CASTLE_MODE ?? "import",
   settleMs: 1000,
+  // configure 返回后继续观察 3 秒
+  postConfigureObserveMs: 3000,
+  // token 返回后继续观察 2 秒
+  postTokenObserveMs: 2000,
   tokenTimeoutMs: 15000,
   logFile: `logs/castle-${Date.now()}.jsonl`
 };
@@ -67,6 +72,34 @@ if (!["import", "configure", "token"].includes(options.mode)) {
 const trace = createTrace(
   resolve(projectRoot, options.logFile)
 );
+
+// 致命异常监控
+const fatalLogPath = `${trace.outputPath}.fatal.jsonl`;
+process.on("uncaughtExceptionMonitor", (error, origin) => {
+  const record = {
+    timestamp: new Date().toISOString(),
+    type: "process.uncaughtException",
+    origin,
+    error: {
+      name: error?.name,
+      message: error?.message,
+      stack: error?.stack ?? String(error)
+    }
+  };
+
+  try {
+    appendFileSync(
+      fatalLogPath,
+      JSON.stringify(record) + "\n",
+      "utf8"
+    );
+  } catch (writeError) {
+    console.error(
+      "[FatalMonitor] 无法写入异常日志:",
+      writeError
+    );
+  }
+});
 
 console.log("[Castle:HappyDOM] Initializing...");
 
@@ -81,6 +114,32 @@ const {
   Document: browserDocument,
   Navigator: browserNavigator
 } = env;
+
+// ========================================
+// 1.1 Happy DOM iframe 配置
+// ========================================
+
+const iframeSettings = browserWindow.happyDOM?.settings;
+
+if (!iframeSettings) {
+  throw new Error(
+    "Happy DOM settings 不可用，无法配置 iframe"
+  );
+}
+
+const enableIframe = process.env.CASTLE_ENABLE_IFRAME === "1";
+
+iframeSettings.enableIframePageLoading = enableIframe;
+
+console.log("[HappyDOM] iframe 设置:", {
+  enableIframePageLoading:
+  iframeSettings.enableIframePageLoading
+});
+
+trace.emit("environment.settings", {
+  enableIframePageLoading:
+  iframeSettings.enableIframePageLoading
+});
 
 // ========================================
 // 2. 检查环境
@@ -305,6 +364,21 @@ try {
     trace.emit("sdk.configured", {
       completed: true
     });
+
+    // ========================================
+    // Configure 后的异步观察阶段
+    // ========================================
+
+    await trace.stage("observe.configure", async () => {
+      await delay(options.postConfigureObserveMs);
+    });
+
+    trace.emit("observation.snapshot", {
+      readyState: browserDocument.readyState,
+      pluginsLength: browserNavigator.plugins?.length,
+      performanceNow: browserWindow.performance.now(),
+      configureCompleted: configured
+    });
   }
 
   // ========================================
@@ -330,6 +404,10 @@ try {
     };
 
     trace.emit("token.result", result);
+
+    await trace.stage("observe.token", async () => {
+      await delay(options.postTokenObserveMs);
+    });
 
     console.log("[Castle] Token 生成诊断:", result);
   }

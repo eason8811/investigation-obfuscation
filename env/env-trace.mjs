@@ -17,6 +17,7 @@ export function createTrace(filePath) {
   let sequence = 0;
   let currentStage = "environment";
   let writeError = null;
+  let closed = false;
 
   stream.on("error", error => {
     writeError = error;

@@ -1263,10 +1263,10 @@ var n = () => {
     function o(e, t, n, r, i) {
       return Z(e - j.Q, t - j.A, e - -j.O, r - j.V, i);
     }
-    if (P[r(A.Q, A.A, A.O, A.V, A.I)](P[o(A.T, A.b, A.M, A.C, A.P)], P[r(A.q, A.N, A.k, A.h, A.W)])) {
-      var s = F[a(A.f, -A.e, -A.c, -A.p, -A.a) + o(A.v, A.F, A.L, A.s, A.K) + a(A.H, -A.m, -A.j, -A.r, -A.z)](P[r(A.S, A.t, A.o, A.R, A.d)]);
-      F[n(A.x, A.Z, A.B, A.u, A.D)][`${i(A.g, A.i, A.w, A.G, A.Y)}d`](s);
-      return [s, () => ge([s])];
+    if (P[o(A.T, A.b, A.M, A.C, A.P)] === P[r(A.q, A.N, A.k, A.h, A.W)]) {
+      var s = document.createElement("div");
+      document.body.append(s);
+      return [s, () => ge([s])];// return 创建的 div 元素, 以及一个把他删除然后返回的函数
     }
     try {
       var c = I[i(A.X, A.l, A.y, -A.U, -A.E)] || L;
@@ -1311,15 +1311,15 @@ var n = () => {
     function u(e, t, n, r, i) {
       return $(n - O.Q, t - O.A, n - O.O, r - O.V, i);
     }
-    if (P[u(D.Q, D.A, D.O, D.Q, D.V)](P[l(D.I, D.T, D.b, D.M, D.C)], P[u(-D.P, -D.q, D.N, D.k, D.h)])) {
+    if (P[l(D.I, D.T, D.b, D.M, D.C)] === P[u(-D.P, -D.q, D.N, D.k, D.h)]) {
       var d = Se[u(D.W, D.f, D.e, D.c, D.p) + o(D.a, D.v, D.F, D.L, D.s) + o(D.K, D.H, D.V, D.m, D.j)](P[u(D.r, D.z, D.S, D.t, D.o)]);
       fe[o(D.R, D.d, D.x, D.Z, D.B)][`${c(D.u, D.D, D.g, D.i, D.w)}d`](d);
       return [d, () => d([d])];
     }
-    if (e[`${o(D.G, D.Y, D.X, D.l, D.y)}te`]) {
-      var d = e[`${s(D.U, D.E, D.n0, D.n1, D.n2)}te`](P[o(D.n3, D.n4, D.n5, D.n6, D.n7)](De, t), Ce);
-      d[l(D.n8, D.n9, D.nn, D.nJ, D.nQ)]();
-      d[`${u(D.nA, D.nO, D.nV, D.nI, D.p) + o(D.nT, D.nb, D.nM, D.nC, D.nP)}e`] = P[c(D.nq, D.nN, D.nk, D.nh, D.nW)](P[u(D.nf, D.ne, D.nc, D.np, D.na)](_e, P[u(D.nv, D.nF, D.nL, D.ns, D.nM)](n, 10)), 10);
+    if (e.animate) {
+      var d = e.animate(De(t), Ce); // De(t) === '{"color":["#0bc37d","#d788fb"],"transform":["rotate(0deg)","rotate(161deg)"],"easing":"cubic-bezier(0.14,0.37,0.62,-0.54)"}'
+      d.pause();
+      d.currentTime = P[c(D.nq, D.nN, D.nk, D.nh, D.nW)](P[u(D.nf, D.ne, D.nc, D.np, D.na)](_e, P[u(D.nv, D.nF, D.nL, D.ns, D.nM)](n, 10)), 10);
     }
   };
   var Ee = (e, n, r, i) => {
@@ -1402,9 +1402,9 @@ var n = () => {
     F[g(-w.nO, w.nV, w.nI, w.nT, -w.nb)]();
   };
   var De = e => ({
-    color: [`#${J(e[0])}${J(e[1])}${J(e[2])}`, `#${J(e[3])}${J(e[4])}${J(e[5])}`],
-    transform: [`${U(-243, -67, -1, `rJ1g`, -130) + U(-178, -47, -44, `uxZX`, -96)}g)`, `${G(-435, -410, `2xMp`, -396, -415)}e(${Ee(e[6], 60, 360, true)}${$(-379, -288, -472, -280, `VIuO`)}`],
-    easing: `${W(602, 539, 656, `6wi(`, 489) + G(-349, -366, `WMPH`, -261, -215) + W(173, 274, 348, `H!Hv`, 263) + window.Array.from(e[U(118, 266, 111, `H!Hv`, 137)](7))[U(-192, -90, -172, `R0!S`, -82)]((e, t) => Ee(e, t % 2 ? -1 : 0, 1))[G(-480, -278, `V[1N`, -369, -397)]()})`
+    color: [`#${J(e[0])}${J(e[1])}${J(e[2])}`, `#${J(e[3])}${J(e[4])}${J(e[5])}`],// 将第二个参数(数组)转化为16进制
+    transform: [`${U(-243, -67, -1, `rJ1g`, -130) + U(-178, -47, -44, `uxZX`, -96)}g)`, `${G(-435, -410, `2xMp`, -396, -415)}e(${Ee(e[6], 60, 360, true)}${$(-379, -288, -472, -280, `VIuO`)}`], // 'rotate(161deg)' 可能是旋转等某种动画操作, 可能不固定
+    easing: `${W(602, 539, 656, `6wi(`, 489) + G(-349, -366, `WMPH`, -261, -215) + W(173, 274, 348, `H!Hv`, 263) + window.Array.from(e[U(118, 266, 111, `H!Hv`, 137)](7))[U(-192, -90, -172, `R0!S`, -82)]((e, t) => Ee(e, t % 2 ? -1 : 0, 1))[G(-480, -278, `V[1N`, -369, -397)]()})` // cubic-bezier(0.14,0.37,0.62,-0.54)
   });
   function Z(e, n, r, i, a) {
     return t(r - C.Q, a);
@@ -1983,11 +1983,11 @@ var n = () => {
           }
         }
       })[M(c.y, c.U, c.E, c.n0, c.n1)](X);
-      var [F, I] = P[N(c.n2, c.n3, c.n4, c.n5, c.n6)](Y);
-      P[N(c.n7, c.n8, c.n9, c.nn, c.nJ)](Te, F, ne[ee], te);
-      var z = P[A(c.nQ, c.nA, c.nO, c.nV, c.nI)](H, F);
-      Q = P[A(c.nT, -c.nb, -c.nM, -c.nC, -c.nP)](window.Array.from, `${z[N(c.nq, c.nN, c.nk, c.nh, c.nW)]}${z[B(c.nf, c.ne, c.nc, c.np, c.na) + N(c.nv, c.nF, c.nL, c.ns, c.nK)]}`[j(-c.nH, -c.nm, -c.nj, c.y, -c.o) + A(c.nr, c.nz, -c.nS, -c.nt, c.no)](/([\d.-]+)/g))[A(c.nR, c.nd, c.nx, c.nZ, c.nB)](e => L(L(e[0])[`${M(`cXLP`, 182, 453, 320, 435)}ed`](2))[M(`HjqN`, 329, 348, 229, 308) + B(457, `A[1Y`, 285, 364, 318)](16))[A(c.nu, c.nD, c.ng, -c.nb, -c.ni)](``)[`${M(c.AG, c.AY, c.AX, c.Al, c.Ay)}ce`](/[.-]/g, ``);
-      P[M(c.y, c.AU, c.AE, c.O0, c.O1)](I);
+      var [F, I] = P[N(c.n2, c.n3, c.n4, c.n5, c.n6)](Y); // F: 创建的 div 元素, I: 返回 div 元素并将其删除的函数
+      P[N(c.n7, c.n8, c.n9, c.nn, c.nJ)](Te, F, ne[ee], te); // === Te(F, ne[ee], te); ne 是通过 `document.querySelectorAll(".r-69fsg[可能变化, 已观测到变化为'.r-a3vrho']")` 获取到标签后解码的二维数组
+      var z = window.getComputedStyle(F);
+      Q = P[A(c.nT, -c.nb, -c.nM, -c.nC, -c.nP)](window.Array.from, `${z.color}${z.transform}`.matchAll(/([\d.-]+)/g)).map(e => window.Number(window.Number(e[0]).toFixed(2)).toString(16)).join(``).replace(/[.-]/g, ``);
+      P[M(c.y, c.AU, c.AE, c.O0, c.O1)](I); // I()
     }
     function B(e, t, r, i, a) {
       return $(a - n.Q, t - n.A, r - n.O, i - n.V, t);

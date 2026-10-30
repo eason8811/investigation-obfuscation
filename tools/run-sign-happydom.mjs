@@ -22,6 +22,8 @@
  * SIGN_MODE=sign                      # 默认使用 jf / PATCH 特殊分支
  * SIGN_INPUT=... SIGN_METHOD=...      # 可选；覆盖默认签名参数
  * SIGN_STRICT_DOM=0                   # 仅调试缺少 SVG 的响应时使用
+ * SIGN_ANIMATION_BRIDGE=0             # 关闭 WAAPI color/rotate 样式采样适配（默认开启）
+ * SIGN_ANIMATION_DETAILS=1            # 输出完整关键帧摘要，便于与 Chrome 逐项比较
  * SIGN_MONITOR_ANIMATION=0            # 若怀疑监控干扰，可关闭动画与样式钩子
  * SIGN_SHOW_RESULT=1                  # 明确允许才输出完整签名值
  *
@@ -41,6 +43,7 @@ import {
 } from "../env/env-monitor.mjs";
 import {inspectBrowserEnvironment} from "../env/env-overrides.mjs";
 import {createTrace} from "../env/env-trace.mjs";
+import {installAnimationComputedStyleBridge} from "../env/env-animation.mjs";
 
 import {createHash} from "node:crypto";
 import {mkdir, readFile, writeFile} from "node:fs/promises";
@@ -82,6 +85,8 @@ const options = {
   signTimeoutMs: readPositiveInt("SIGN_TIMEOUT_MS", 15000),
   settleMs: readPositiveInt("SIGN_SETTLE_MS", 0),
   strictDom: process.env.SIGN_STRICT_DOM !== "0",
+  animationBridge: process.env.SIGN_ANIMATION_BRIDGE !== "0",
+  animationDetails: process.env.SIGN_ANIMATION_DETAILS === "1",
   monitorAnimation: process.env.SIGN_MONITOR_ANIMATION !== "0",
   showResult: process.env.SIGN_SHOW_RESULT === "1",
   // Pm() 在 jf.x.com 分支中固定调用 signer('jf', 'PATCH')。
@@ -537,6 +542,46 @@ function monitorAnimationAndComputedStyle(window) {
   });
 }
 
+/**
+ * Happy DOM 可设置 Animation.currentTime，但没有把动画的颜色/旋转插值
+ * 反映到 getComputedStyle。适配层只补这两个动画属性
+ * probe 使用与 sign 相同的安装路径，确保探针验证的是实际生效的环境
+ */
+function installSignAnimationAdapter(window) {
+  if (!options.animationBridge) {
+    logStageInfo("animation.bridge", {enabled: false});
+    return;
+  }
+  let createLogs = 0;
+  let sampleLogs = 0;
+  let unsupportedLogs = 0;
+  installAnimationComputedStyleBridge(window, {
+    onCreate(record) {
+      if (++createLogs > 16) return;
+      const data = {
+        element: record.element,
+        animationType: record.animationType,
+        keyframeCount: record.keyframes?.length ?? null,
+        timing: record.timing
+      };
+      if (options.animationDetails) {
+        // 不记录 Meta、SVG path、签名正文；仅采样动画所需的关键帧。
+        data.keyframes = record.keyframes;
+      }
+      logStageInfo("animation.bridge.create", data);
+    },
+    onSample(record) {
+      if (++sampleLogs > 48) return;
+      logStageInfo("animation.bridge.sample", record);
+    },
+    onUnsupported(record) {
+      if (++unsupportedLogs > 12) return;
+      logStageInfo("animation.bridge.unsupported", record);
+    }
+  });
+  logStageInfo("animation.bridge", {enabled: true, implementation: "color-rotate-cubic-bezier"});
+}
+
 /** 在空白 DOM 中做一致性探针，不依赖任何目标站点数据。 */
 function runAnimationProbe(window, document) {
   // ===== 静态 CSS 计算样式探针 =====
@@ -702,6 +747,7 @@ try {
   } = env;
 
   disableAutomaticResourceLoading(browserWindow);
+  installSignAnimationAdapter(browserWindow);
 
   if (options.mode === "probe") {
     const pass = await trace.stage("animation.probe.run", () =>

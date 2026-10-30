@@ -539,6 +539,28 @@ function monitorAnimationAndComputedStyle(window) {
 
 /** 在空白 DOM 中做一致性探针，不依赖任何目标站点数据。 */
 function runAnimationProbe(window, document) {
+  // ===== 静态 CSS 计算样式探针 =====
+  const element = document.createElement("div");
+
+  document.body.appendChild(element);
+
+  try {
+    element.style.color = "rgb(11, 195, 125)";
+    element.style.transform = "rotate(45deg)";
+
+    const style = window.getComputedStyle(element);
+
+    logStageInfo("style.static.probe", {
+      inlineColor: element.style.color,
+      inlineTransform: element.style.transform,
+      computedColor: style.color,
+      computedTransform: style.transform,
+      disabled: window.happyDOM.settings.disableComputedStyleRendering
+    });
+  } finally {
+    element.remove();
+  }
+
   const tests = [
     {
       name: "array-keyframes-linear",

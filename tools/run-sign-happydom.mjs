@@ -669,6 +669,56 @@ function runAnimationProbe(window, document) {
   return pass;
 }
 
+function monitorDigestInput(window, trace) {
+  const subtle = window.crypto.subtle;
+  const originalDigest = subtle.digest;
+
+  Object.defineProperty(subtle, "digest", {
+    configurable: true,
+    writable: true,
+
+    value: function (algorithm, data) {
+      let bytes;
+
+      if (ArrayBuffer.isView(data)) {
+        bytes = new Uint8Array(
+            data.buffer,
+            data.byteOffset,
+            data.byteLength
+        );
+      } else if (data instanceof ArrayBuffer) {
+        bytes = new Uint8Array(data);
+      } else {
+        throw new TypeError("Unsupported digest input");
+      }
+
+      const hex = Array.from(bytes, byte =>
+          byte.toString(16).padStart(2, "0")
+      ).join("");
+
+      const record = {
+        algorithm:
+            typeof algorithm === "string"
+                ? algorithm
+                : algorithm?.name,
+
+        byteLength: bytes.byteLength,
+        inputHex: hex
+      };
+
+      console.log("[Sign] digest.input:", record);
+      trace.emit("digest.input", record);
+
+      // 保持原生方法的 this、参数及 Promise 返回值。
+      return Reflect.apply(
+          originalDigest,
+          this,
+          arguments
+      );
+    }
+  });
+}
+
 function monitorSignDom(window, document) {
   const record = item => trace.emit("method.call", item);
   const config = {
@@ -691,13 +741,22 @@ function monitorSignDom(window, document) {
     monitorMethod(window.Node.prototype, "removeChild", "Node", config);
   }
   if (window.crypto?.subtle) {
-    monitorMethod(window.crypto.subtle, "digest", "SubtleCrypto", {
-      args: "first", // SHA-256 等算法名称；避免记录完整输入字节
-      result: false,
-      traceFirst: 0,
-      maxLogs: 60,
-      onRecord: record
-    });
+    if (process.env.SIGN_DEBUG_DIGEST === "1") {
+      monitorDigestInput(window, trace);
+    }
+
+    monitorMethod(
+        window.crypto.subtle,
+        "digest",
+        "SubtleCrypto",
+        {
+          args: "first",
+          result: false,
+          traceFirst: 0,
+          maxLogs: 60,
+          onRecord: record
+        }
+    );
   }
 }
 

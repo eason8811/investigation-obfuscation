@@ -537,6 +537,49 @@ if (testContext) {
   }
 }
 
+const originalStdoutWrite = process.stdout.write;
+const originalStderrWrite = process.stderr.write;
+
+// 保存原始写入函数，防止监控日志再次触发监控
+const writeDiagnostic =
+  originalStderrWrite.bind(process.stderr);
+
+function monitorOutputStream(stream, streamName) {
+  const originalWrite = stream.write;
+
+  stream.write = function (chunk, encoding, callback) {
+    const content = Buffer.isBuffer(chunk)
+      ? chunk.toString("utf8")
+      : String(chunk);
+
+    if (
+      content.includes("[Error") ||
+      content.includes("ErrorPrepareStackTrace")
+    ) {
+      const callerStack = new Error(
+        `Output captured from ${streamName}`
+      ).stack;
+
+      writeDiagnostic(
+        `\n[OutputMonitor] ${streamName} 命中目标输出\n`
+      );
+
+      writeDiagnostic(
+        `[OutputMonitor] 内容:\n${content}\n`
+      );
+
+      writeDiagnostic(
+        `[OutputMonitor] 调用栈:\n${callerStack}\n`
+      );
+    }
+
+    return originalWrite.apply(this, arguments);
+  };
+}
+
+monitorOutputStream(process.stdout, "stdout");
+monitorOutputStream(process.stderr, "stderr");
+
 let sdkModule;
 let sdk;
 let tokenSdk;

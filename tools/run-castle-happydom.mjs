@@ -18,9 +18,17 @@ import {
 } from "node:timers/promises";
 
 import {resolve} from "node:path";
-import {pathToFileURL, fileURLToPath} from "node:url";
+import {pathToFileURL, fileURLToPath, URL as NodeURL} from "node:url";
 import {createTrace} from "../env/env-trace.mjs";
 import {appendFileSync} from "node:fs";
+import {mkdir, readFile, writeFile} from "node:fs/promises";
+import {dirname} from "node:path";
+import {createHash} from "node:crypto";
+import {discoverSdk, persistSdkGraph, validateAssetUrl} from "./sdk-resource-utils.mjs";
+
+// 在 Happy DOM 覆盖全局 Web API 之前保存 Node 原生网络对象。
+const nodeFetch = globalThis.fetch.bind(globalThis);
+const nodeAbortSignal = globalThis.AbortSignal;
 
 const projectRoot = fileURLToPath(
   new URL("../", import.meta.url)
@@ -53,25 +61,240 @@ async function withTimeout(action, timeoutMs) {
 
 const options = {
   sdkPath: process.env.CASTLE_SDK_PATH ?? "deobfus/castle-readable.js",
-  publicKey: process.env.CASTLE_PUBLIC_KEY ?? "pk_AvRa79bHyJSYSQHnRpcVtzyxetSvFerx",
-  // import | configure | token
+  sdkSource: process.env.CASTLE_SDK_SOURCE ?? (process.env.CASTLE_SDK_FETCH_URL ? "url" : "auto"),
+  sdkFetchUrl: process.env.CASTLE_SDK_FETCH_URL || null,
+  sdkReferer: process.env.CASTLE_SDK_REFERER || null,
+  fetchUrl: process.env.CASTLE_FETCH_URL ?? "https://x.com/",
+  htmlPath: process.env.CASTLE_HTML_PATH || null,
+  // 自动模式优先使用当前 HTML 中配套的公钥；手动覆盖仅用于比较实验。
+  publicKey: process.env.CASTLE_PUBLIC_KEY || null,
+  allowRemoteSdkExecution: process.env.CASTLE_ALLOW_REMOTE_SDK_EXECUTION === "1",
+  saveHtml: process.env.CASTLE_SAVE_HTML === "1",
+  saveDiscoveryAssets: process.env.CASTLE_SAVE_DISCOVERY_ASSETS === "1",
+  expectedHtmlSha256: process.env.CASTLE_EXPECTED_HTML_SHA256 || null,
+  expectedSdkSha256: process.env.CASTLE_EXPECTED_SDK_SHA256 || null,
+  fetchTimeoutMs: Number(process.env.CASTLE_FETCH_TIMEOUT_MS ?? 15000),
+  sdkFetchTimeoutMs: Number(process.env.CASTLE_SDK_FETCH_TIMEOUT_MS ?? 15000),
+  // fetch | import | configure | token
   mode: process.env.CASTLE_MODE ?? "import",
   settleMs: 1000,
   // configure 返回后继续观察 3 秒
   postConfigureObserveMs: 3000,
   // token 返回后继续观察 2 秒
   postTokenObserveMs: 2000,
-  tokenTimeoutMs: 15000,
+  tokenTimeoutMs: Number(process.env.CASTLE_TOKEN_TIMEOUT_MS ?? 15000),
   logFile: `logs/castle-${Date.now()}.jsonl`
 };
 
-if (!["import", "configure", "token"].includes(options.mode)) {
+if (!["fetch", "import", "configure", "token"].includes(options.mode)) {
   throw new Error(`不支持的 CASTLE_MODE: ${options.mode}`);
+}
+if (!["auto", "url", "local"].includes(options.sdkSource)) {
+  throw new Error(`不支持的 CASTLE_SDK_SOURCE: ${options.sdkSource}`);
+}
+for (const name of ["fetchTimeoutMs", "sdkFetchTimeoutMs", "tokenTimeoutMs"]) {
+  if (!Number.isSafeInteger(options[name]) || options[name] <= 0) {
+    throw new Error(`CASTLE ${name} 必须是正整数`);
+  }
 }
 
 const trace = createTrace(
   resolve(projectRoot, options.logFile)
 );
+
+function logStageInfo(stage, details) {
+  trace.emit(stage, details);
+  console.log(`[Castle] ${stage}:`, details);
+}
+
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function checkHash(label, actual, expected) {
+  if (!expected) return;
+  if (!/^[0-9a-f]{64}$/i.test(expected) || actual !== expected.toLowerCase()) {
+    throw new Error(`${label} SHA-256 指纹与 CASTLE_EXPECTED_* 不一致：${actual}`);
+  }
+}
+
+function withHeaderOverrides(headers, variable) {
+  if (!process.env[variable]) return headers;
+  const value = JSON.parse(process.env[variable]);
+  if (!value || Array.isArray(value) || typeof value !== "object") {
+    throw new TypeError(`${variable} 必须是 JSON 对象`);
+  }
+  return {...headers, ...value};
+}
+
+function sdkHeaders(referer) {
+  return withHeaderOverrides({
+    accept: "*/*",
+    "accept-language": "zh-CN,zh;q=0.9,en;q=0.7",
+    origin: "https://x.com",
+    referer,
+    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36"
+  }, "CASTLE_SDK_FETCH_HEADERS_JSON");
+}
+
+async function limitedText(response, maxBytes) {
+  const size = Number(response.headers.get("content-length"));
+  if (Number.isFinite(size) && size > maxBytes) throw new Error("HTTP 内容超过大小限制");
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let text = "";
+  let total = 0;
+  try {
+    for (;;) {
+      const {value, done} = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) throw new Error("HTTP 内容超过大小限制");
+      text += decoder.decode(value, {stream: true});
+    }
+    return text + decoder.decode();
+  } finally {
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+}
+
+async function fetchCdnAsset(input, kind, referer) {
+  const url = validateAssetUrl(input, kind === "entry" ? "entry" : "asset");
+  const response = await nodeFetch(url.href, {
+    headers: sdkHeaders(referer),
+    redirect: "manual",
+    signal: nodeAbortSignal.timeout(options.sdkFetchTimeoutMs)
+  });
+  const finalUrl = validateAssetUrl(response.url, kind === "entry" ? "entry" : "asset");
+  if (!response.ok || response.redirected || finalUrl.href !== url.href) {
+    throw new Error(`${kind} 下载失败或跳转：HTTP ${response.status}`);
+  }
+  const contentType = response.headers.get("content-type") || "";
+  if (/text\/html|application\/json/i.test(contentType)) {
+    throw new Error(`${kind} 响应并非 JavaScript：${contentType}`);
+  }
+  const content = await limitedText(response, 10 * 1024 * 1024);
+  if (!content.trim()) throw new Error(`${kind} 内容为空`);
+  const hash = sha256(content);
+  logStageInfo("sdk.asset", {kind, url: url.href, sha256: hash, bytes: Buffer.byteLength(content)});
+  return {url, content, hash};
+}
+
+async function loadHtml() {
+  if (options.htmlPath) {
+    const filePath = resolve(projectRoot, options.htmlPath);
+    const html = await readFile(filePath, "utf8");
+    logStageInfo("html.source", {type: "file", filePath});
+    return html;
+  }
+  const fetchUrl = new NodeURL(options.fetchUrl);
+  if (fetchUrl.protocol !== "https:" || !["x.com", "www.x.com"].includes(fetchUrl.hostname) || fetchUrl.port) {
+    throw new Error("CASTLE_FETCH_URL 必须指向 HTTPS x.com");
+  }
+  const response = await nodeFetch(fetchUrl.href, {
+    headers: withHeaderOverrides({
+      accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "accept-language": "zh-CN,zh;q=0.9,en;q=0.7",
+      "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36"
+    }, "CASTLE_HEADERS_JSON"),
+    redirect: "follow",
+    signal: nodeAbortSignal.timeout(options.fetchTimeoutMs)
+  });
+  const finalUrl = new NodeURL(response.url);
+  if (finalUrl.protocol !== "https:" || !["x.com", "www.x.com"].includes(finalUrl.hostname) || finalUrl.port || !response.ok) {
+    throw new Error(`HTML 响应来源或状态异常：${response.status} ${response.url}`);
+  }
+  if (!/text\/html/i.test(response.headers.get("content-type") || "")) {
+    throw new Error("HTML Content-Type 不符合预期");
+  }
+  return limitedText(response, 5 * 1024 * 1024);
+}
+
+async function saveSnapshot(kind, source, hash, extension = "js") {
+  const pathname = resolve(projectRoot, "data/castle-snapshots", `${kind}-${hash}.${extension}`);
+  await mkdir(dirname(pathname), {recursive: true});
+  try {
+    await writeFile(pathname, source, {flag: "wx", mode: 0o600});
+  } catch (error) {
+    if (error.code !== "EEXIST") throw error;
+  }
+  return pathname;
+}
+
+async function prepareCastle() {
+  if (options.sdkSource === "local") {
+    const sdkFile = resolve(projectRoot, options.sdkPath);
+    const bytes = await readFile(sdkFile);
+    checkHash("SDK", sha256(bytes), options.expectedSdkSha256);
+    const html = options.htmlPath ? await loadHtml() : null;
+    return {sdkFile, html, publicKey: options.publicKey ?? "pk_AvRa79bHyJSYSQHnRpcVtzyxetSvFerx"};
+  }
+
+  const html = await trace.stage("html.load", loadHtml);
+  if (!html.trim()) throw new Error("HTML 为空");
+  const htmlHash = sha256(html);
+  logStageInfo("html.snapshot", {sha256: htmlHash, length: html.length});
+  checkHash("HTML", htmlHash, options.expectedHtmlSha256);
+  if (options.saveHtml && !options.htmlPath) {
+    logStageInfo("html.saved", {filePath: await saveSnapshot("html", html, htmlHash, "html")});
+  }
+
+  let sdkHref;
+  let referer;
+  let publicKey;
+  if (options.sdkSource === "auto") {
+    const discovered = await trace.stage("sdk.discovery", () => discoverSdk(html, {
+      target: "castle",
+      fetchAsset: fetchCdnAsset,
+      onEvent: logStageInfo
+    }));
+    sdkHref = discovered.sdkUrl;
+    referer = discovered.referer;
+    publicKey = options.publicKey ?? discovered.publicKey;
+    if (options.saveDiscoveryAssets) {
+      const entryFile = await saveSnapshot("entry", discovered.entry.content, discovered.entry.hash);
+      const startupFile = await saveSnapshot("startup", discovered.startup.content, discovered.startup.hash);
+      logStageInfo("sdk.discovery.saved", {entryFile, startupFile});
+    }
+  } else {
+    if (!options.sdkFetchUrl) throw new Error("CASTLE_SDK_SOURCE=url 需要 CASTLE_SDK_FETCH_URL");
+    sdkHref = validateAssetUrl(options.sdkFetchUrl);
+    referer = options.sdkReferer ?? options.fetchUrl;
+    publicKey = options.publicKey;
+  }
+  if (!publicKey) throw new Error("未找到 Castle 公钥，请指定 CASTLE_PUBLIC_KEY");
+
+  const sdkAsset = await trace.stage("sdk.download", () => fetchCdnAsset(sdkHref, "sdk", referer));
+  checkHash("SDK", sdkAsset.hash, options.expectedSdkSha256);
+  const sdkFile = await trace.stage("sdk.graph", () => persistSdkGraph(sdkAsset, {
+    directory: resolve(projectRoot, "data/castle-snapshots/sdk-bundles"),
+    fetchAsset: fetchCdnAsset,
+    onEvent: logStageInfo
+  }));
+  logStageInfo("sdk.snapshot", {sdkFile, sha256: sdkAsset.hash, url: sdkAsset.url.href, publicKeyFound: true});
+  return {sdkFile, html, publicKey};
+}
+
+let prepared;
+try {
+  // 网络下载全部在安装 Happy DOM 前完成，以免 Node fetch 的 AbortSignal 不兼容。
+  prepared = await trace.stage("sdk.prepare", prepareCastle);
+} catch (error) {
+  trace.emit("execution.error", {name: error?.name, message: error?.message, stack: error?.stack});
+  await trace.close();
+  throw error;
+}
+
+if (options.mode === "fetch") {
+  console.log("[Castle] fetch 模式：资源链与依赖已准备，没有执行 SDK。");
+  await trace.close();
+} else {
+  if (options.sdkSource !== "local" && !options.allowRemoteSdkExecution) {
+    await trace.close();
+    throw new Error("下载远程 Castle SDK 后执行需要显式设置 CASTLE_ALLOW_REMOTE_SDK_EXECUTION=1");
+  }
 
 // 致命异常监控
 const fatalLogPath = `${trace.outputPath}.fatal.jsonl`;
@@ -104,7 +327,7 @@ process.on("uncaughtExceptionMonitor", (error, origin) => {
 console.log("[Castle:HappyDOM] Initializing...");
 
 const env = initializeBrowserEnvironment({
-  url: "https://x.com/",
+  url: options.fetchUrl,
   width: 1920,
   height: 1080
 });
@@ -127,9 +350,29 @@ if (!iframeSettings) {
   );
 }
 
-const enableIframe = process.env.CASTLE_ENABLE_IFRAME === "1";
+const enableIframe = process.env.CASTLE_ENABLE_IFRAME !== "0";
 
 iframeSettings.enableIframePageLoading = enableIframe;
+
+// 载入当前 HTML 的 DOM，不执行外部页面脚本，也不自动拉取 CSS/图片。
+for (const [key, value] of Object.entries({
+  enableJavaScriptEvaluation: false,
+  disableJavaScriptEvaluation: true,
+  disableJavaScriptFileLoading: true,
+  enableCSSFileLoading: false,
+  disableCSSFileLoading: true,
+  enableImageFileLoading: true,
+  handleDisabledFileLoadingAsSuccess: true
+})) {
+  if (key in iframeSettings) iframeSettings[key] = value;
+}
+
+if (prepared.html !== null) {
+  browserDocument.open();
+  browserDocument.write(prepared.html);
+  browserDocument.close();
+  trace.emit("html.injected", {length: prepared.html.length});
+}
 
 console.log("[HappyDOM] iframe 设置:", {
   enableIframePageLoading:
@@ -305,12 +548,7 @@ try {
   // ========================================
 
   sdkModule = await trace.stage("import", async () => {
-    const sdkFile = resolve(
-      projectRoot,
-      options.sdkPath
-    );
-
-    return import(pathToFileURL(sdkFile).href);
+    return import(pathToFileURL(prepared.sdkFile).href);
   });
 
   sdk = sdkModule.default;
@@ -348,7 +586,7 @@ try {
   // ========================================
 
   if (options.mode !== "import") {
-    if (!options.publicKey) {
+    if (!prepared.publicKey) {
       throw new Error(
         "缺少 CASTLE_PUBLIC_KEY 环境变量"
       );
@@ -357,7 +595,7 @@ try {
     const configuredSdk = await trace.stage(
       "configure",
       () => sdk.configure({
-        pk: options.publicKey
+        pk: prepared.publicKey
       })
     );
 
@@ -473,3 +711,4 @@ try {
 // 当前测试在独立 Node 进程中运行。
 // 如需继续观察 SDK 的长期任务，
 // 可以延长观察时间。
+}

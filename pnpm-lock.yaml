@@ -187,6 +187,9 @@ importers:
       canvas:
         specifier: ^3.2.3
         version: 3.2.3
+      es-module-lexer:
+        specifier: ^3.0.4
+        version: 3.0.4
       happy-dom:
         specifier: ^21.0.4
         version: 21.0.4
@@ -421,6 +424,9 @@ packages:
   entities@7.0.1:
     resolution: {integrity: sha512-TWrgLOFUQTH994YUyl1yT4uyavY5nNB5muff+RtWaqNVCAK408b5ZnnbNAUEWLTCpum9w6arT70i1XdQ4UeOPA==}
     engines: {node: '>=0.12'}
+
+  es-module-lexer@3.0.4:
+    resolution: {integrity: sha512-BldNY5mwkVu+cQ5Ymn3e6hB9Sx8XHx4ZevWbiUyZbfKxJxYO27Hf0wfzkxIaD5CAJMaGl3YspKELj0ff/7nCMA==}
 
   escalade@3.2.0:
     resolution: {integrity: sha512-WUj2qlxaQtO4g6Pq5c29GTcWGDyd8itL8zTlipgECz3JesAiiOKotd8JU6otB3PACgG6xkJUyVhboMS+bje/jA==}
@@ -882,6 +888,8 @@ snapshots:
       once: 1.4.0
 
   entities@7.0.1: {}
+
+  es-module-lexer@3.0.4: {}
 
   escalade@3.2.0: {}
 

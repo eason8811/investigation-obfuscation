@@ -9,7 +9,7 @@
  * SIGN_FETCH_URL=https://x.com/
  * SIGN_SDK_SOURCE=auto|url|local                    # 默认 auto：从当前 HTML 追踪资源链
  * SIGN_SDK_PATH=deobfus/sign-webcrack.js            # local 模式使用
- * SIGN_SDK_FETCH_URL=https://abs.twimg.com/x-web/x-web/assets/sign.o-XXXX.js # url 模式使用
+ * SIGN_SDK_FETCH_URL=https://abs.twimg.com/x-web/x-web/assets/<hash>.js # url 模式使用
  * SIGN_SDK_REFERER=https://abs.twimg.com/.../startup-dynamic-XXXX.js  # 可选
  * SIGN_SDK_FETCH_HEADERS_JSON='{"accept-language":"en-US,en;q=0.9"}' # 可选
  * SIGN_ALLOW_REMOTE_SDK_EXECUTION=1                 # 显式允许导入已下载的远程源码
@@ -30,9 +30,10 @@
  * 注意：
  * 1. 本脚本只载入服务器响应的 HTML，不执行 HTML 内包含的脚本。
  * 2. SIGN_MODE=probe 无需网络/SDK，可与 Chrome 对照动画采样。
- * 3. auto: HTML -> entry-client-logged-out -> startup-dynamic -> sign.o-*。
- * 4. 只解析字符串引用，不执行 entry / startup；下载源码与执行 SDK 分开授权。
- * 5. 同一资源引用链比独立猜测 URL 可靠，但跨 CDN 的请求不具备原子性。
+ * 3. auto: HTML -> Entry -> 以 jf.x.com/PATCH 特征定位的哈希模块 -> SDK 动态导入。
+ * 4. SDK 的静态及字面量动态 import 依赖会一并下载到隔离的 ESM 目录。
+ * 5. 只解析字符串引用，不执行 Entry/Startup；下载源码与执行 SDK 分开授权。
+ * 6. 同一资源引用链比独立猜测 URL 可靠，但跨 CDN 的请求不具备原子性。
  */
 
 import {initializeBrowserEnvironment} from "../env/env-happydom.mjs";
@@ -44,6 +45,7 @@ import {
 import {inspectBrowserEnvironment} from "../env/env-overrides.mjs";
 import {createTrace} from "../env/env-trace.mjs";
 import {installAnimationComputedStyleBridge} from "../env/env-animation.mjs";
+import {discoverSdk, persistSdkGraph, validateAssetUrl} from "./sdk-resource-utils.mjs";
 
 import {createHash} from "node:crypto";
 import {mkdir, readFile, writeFile} from "node:fs/promises";
@@ -136,21 +138,9 @@ async function persistHtmlSnapshot(html, hash) {
   logStageInfo("html.saved", {filePath});
 }
 
-/** 限定三种已知 X CDN 资源，避免递归抓取任意 URL。 */
+/** 限定 Entry 和 assets 中的哈希 JS，资源角色由内容特征识别。 */
 function validateCdnAssetUrl(value, kind) {
-  const url = new NodeURL(value);
-  const paths = {
-    entry: /^\/x-web\/x-web\/entry-client-logged-out-[A-Za-z0-9_-]+\.js$/,
-    startup: /^\/x-web\/x-web\/assets\/startup-dynamic-[A-Za-z0-9_-]+\.js$/,
-    sdk: /^\/x-web\/x-web\/assets\/sign\.o-[A-Za-z0-9_-]+\.js$/
-  };
-  if (!Object.hasOwn(paths, kind)) throw new Error(`不支持的资源类型：${kind}`);
-  if (url.protocol !== "https:" || url.hostname !== "abs.twimg.com" ||
-    url.username || url.password || !paths[kind].test(url.pathname) ||
-    url.search || url.hash) {
-    throw new Error(`非法 ${kind} 资源地址：必须是 abs.twimg.com 上对应类型的 HTTPS JS 资源`);
-  }
-  return url;
+  return validateAssetUrl(value, kind === "entry" ? "entry" : "asset");
 }
 
 function sdkRequestHeaders(referer = null) {
@@ -191,6 +181,31 @@ function extractUniqueReference(source, pattern, label) {
   return candidates[0];
 }
 
+async function readLimitedText(response, maxBytes) {
+  const contentLength = Number(response.headers.get("content-length"));
+  if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+    throw new Error(`响应超过 ${maxBytes} 字节上限`);
+  }
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let bytes = 0;
+  let result = "";
+  try {
+    for (;;) {
+      const {value, done} = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      if (bytes > maxBytes) throw new Error(`响应超过 ${maxBytes} 字节上限`);
+      result += decoder.decode(value, {stream: true});
+    }
+    return result + decoder.decode();
+  } finally {
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+}
+
 /** 只读取远端 JavaScript 文本，不执行；每次都验证重定向后的最终地址。 */
 async function fetchCdnAsset(urlInput, kind, referer) {
   const requestedUrl = validateCdnAssetUrl(urlInput, kind);
@@ -218,7 +233,7 @@ async function fetchCdnAsset(urlInput, kind, referer) {
   if (sizeHeader > 10 * 1024 * 1024) {
     throw new Error(`${kind} 响应超过 10 MiB 限制`);
   }
-  const content = await response.text();
+  const content = await readLimitedText(response, 10 * 1024 * 1024);
   const size = Buffer.byteLength(content, "utf8");
   if (!content.trim() || size > 10 * 1024 * 1024) {
     throw new Error(`${kind} 内容为空或超过 10 MiB 限制`);
@@ -240,50 +255,21 @@ async function saveAssetSnapshot(kind, content, hash) {
   return filePath;
 }
 
-/**
- * 自动发现资源链（用户已通过浏览器断点证实的引用结构）：
- * HTML 的 entry-client-logged-out URL -> entry 的 startup-dynamic specifier
- * -> startup 的 sign.o-* specifier。所有相对路径都以引用所在模块的 URL 为基准。
- */
+/** 自动发现：入口的哈希静态依赖 -> 带 JF/PATCH 标记的模块 -> SDK。 */
 async function discoverSdkFromHtml(html) {
-  const entryHref = extractUniqueReference(
-    html,
-    /https:\/\/abs\.twimg\.com\/x-web\/x-web\/entry-client-logged-out-[A-Za-z0-9_-]+\.js/g,
-    "HTML 中的 entry-client-logged-out"
-  );
-  const entry = await trace.stage("sdk.discovery.entry", () =>
-    fetchCdnAsset(entryHref, "entry", options.fetchUrl)
-  );
-  const startupSpecifier = extractUniqueReference(
-    entry.content,
-    /["'`](\.\/assets\/startup-dynamic-[A-Za-z0-9_-]+\.js)["'`]/g,
-    "entry 中的 startup-dynamic"
-  );
-  const startupHref = new NodeURL(startupSpecifier, entry.url).href;
-  const startup = await trace.stage("sdk.discovery.startup", () =>
-    fetchCdnAsset(startupHref, "startup", entry.url.href)
-  );
-  const sdkSpecifier = extractUniqueReference(
-    startup.content,
-    /["'`](\.\/sign\.o-[A-Za-z0-9_-]+\.js)["'`]/g,
-    "startup 中的 sign.o"
-  );
-  const sdkHref = validateCdnAssetUrl(new NodeURL(sdkSpecifier, startup.url).href, "sdk").href;
-  const appVersion = html.match(/\bdata-app-version\s*=\s*["']([^"']+)["']/)?.[1] ?? null;
-  logStageInfo("sdk.discovery.chain", {
-    appVersion,
-    entryUrl: entry.url.href,
-    entrySha256: entry.hash,
-    startupUrl: startup.url.href,
-    startupSha256: startup.hash,
-    sdkUrl: sdkHref
+  const result = await discoverSdk(html, {
+    target: "sign",
+    fetchAsset: (url, kind, referer) => fetchCdnAsset(url, kind, referer),
+    onEvent: logStageInfo
   });
+  const appVersion = html.match(/\bdata-app-version\s*=\s*["']([^"']+)["']/)?.[1] ?? null;
+  logStageInfo("sdk.discovery.version", {appVersion});
   if (options.saveDiscoveryAssets) {
-    const entryFile = await saveAssetSnapshot("entry", entry.content, entry.hash);
-    const startupFile = await saveAssetSnapshot("startup", startup.content, startup.hash);
+    const entryFile = await saveAssetSnapshot("entry", result.entry.content, result.entry.hash);
+    const startupFile = await saveAssetSnapshot("startup", result.startup.content, result.startup.hash);
     logStageInfo("sdk.discovery.saved", {entryFile, startupFile});
   }
-  return {sdkHref, referer: startup.url.href};
+  return {sdkHref: result.sdkUrl.href, referer: result.referer};
 }
 
 async function prepareSdkFile(html) {
@@ -312,7 +298,12 @@ async function prepareSdkFile(html) {
     fetchCdnAsset(sdkHref, "sdk", referer)
   );
   assertExpectedHash("SDK", sdk.hash, options.expectedSdkSha256);
-  const filePath = await saveAssetSnapshot("sdk", sdk.content, sdk.hash);
+  // 保留原始 CDN 文件名和相对导入关系，避免单文件 sdk-<sha>.mjs 缺失依赖。
+  const filePath = await trace.stage("sdk.graph", () => persistSdkGraph(sdk, {
+    directory: resolve(projectRoot, "data/sign-snapshots/sdk-bundles"),
+    fetchAsset: (url, kind, parent) => fetchCdnAsset(url, kind, parent),
+    onEvent: logStageInfo
+  }));
   logStageInfo("sdk.snapshot", {
     type: options.sdkSource, sourceUrl: sdk.url.href,
     filePath, size: sdk.size, sha256: sdk.hash
@@ -380,7 +371,7 @@ async function loadHtml() {
     throw new Error(`期望 text/html，实际是 ${metadata.contentType ?? "未知"}`);
   }
 
-  return response.text();
+  return readLimitedText(response, 5 * 1024 * 1024);
 }
 
 function disableAutomaticResourceLoading(browserWindow) {

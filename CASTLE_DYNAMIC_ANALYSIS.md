@@ -14,7 +14,7 @@
 ## 2. 注入和采集
 
 1. 打开目标页面，按 F12，进入 `Sources > Snippets`，新建 `castle-browser-observer`。
-2. 将 `tools/castle-browser-observer.js` 的全部内容粘贴进去并运行（Ctrl+Enter）。
+2. 将 `browser/castle-browser-observer.js` 的全部内容粘贴进去并运行（Ctrl+Enter）。
 3. 在控制台执行：
 
    ```js

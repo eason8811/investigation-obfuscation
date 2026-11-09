@@ -1,7 +1,7 @@
 /*
- * Castle browser observer v0.1
+ * Castle browser observer v0.2
  * Chrome DevTools > Sources > Snippets: paste this entire file and run.
- * Passive tracing only: no requests are sent and no token/header values are exported.
+ * Passive tracing only: no requests are sent and no token/header/body values are exported.
  * Run after page load for late-stage observation; see the accompanying guide for
  * the limitation concerning SDK initialization before the snippet is installed.
  */
@@ -9,16 +9,19 @@
   'use strict';
 
   const root = globalThis;
-  if (root.__castleObserver?.version === '0.1.0') {
-    console.info('[CastleObserver] Already installed; call __castleObserver.status()');
+  if (root.__castleObserver?.status?.().active) {
+    console.warn('[CastleObserver] An observer is already installed. Export and stop it before installing v0.2.');
     return;
   }
 
   const settings = Object.freeze({
-    maxEvents: 8000,
-    maxEventsPerApi: 240,
+    maxEvents: 30000,
+    maxEventsPerApi: 10000,
     captureStack: true,
     maxStackLines: 5,
+    recordTextSamples: false,
+    inspectStringRequestBodies: true,
+    maxJsonBodyInspectionBytes: 256 * 1024,
   });
   const started = new Date().toISOString();
   const nativeNow = root.performance?.now?.bind(root.performance) ?? (() => Date.now());
@@ -27,8 +30,10 @@
   const counters = new Map();
   const latestTokens = [];
   const requests = new Map();
+  const watchedMethods = new WeakMap();
   let seq = 0;
   let requestSeq = 0;
+  let sdkCallSeq = 0;
   let dropped = 0;
   let active = true;
 
@@ -40,6 +45,19 @@
       .trim());
   }
 
+  function shortHash(value, maxSamples = 4096) {
+    if (value == null) return undefined;
+    const length = value.length ?? value.byteLength ?? 0;
+    if (typeof length !== 'number') return undefined;
+    const step = Math.max(1, Math.ceil(length / maxSamples));
+    let hash = 0x811c9dc5;
+    for (let i = 0; i < length; i += step) {
+      const n = typeof value === 'string' ? value.charCodeAt(i) : value[i];
+      hash = Math.imul(hash ^ n, 0x01000193) >>> 0;
+    }
+    return `sample-fnv32:${hash.toString(16).padStart(8, '0')}:${step}`;
+  }
+
   function summary(value) {
     if (value === null) return null;
     const type = typeof value;
@@ -47,7 +65,8 @@
     if (type === 'number' || type === 'boolean') return value;
     if (type === 'string') {
       // Never persist long opaque strings; these may be credentials or fingerprints.
-      return value.length > 200 ? {type: 'string', length: value.length} : value;
+      return value.length > 200
+        ? {type: 'string', length: value.length, sampleHash: shortHash(value)} : value;
     }
     if (type === 'bigint') return {type, value: String(value)};
     if (type === 'function') return {type};
@@ -57,7 +76,9 @@
         ...(typeof value.length === 'number' && length <= 16 ? {values: Array.from(value)} : {})};
     }
     if (Array.isArray(value)) {
-      return {type: 'Array', length: value.length, first: value.slice(0, 12).map(summary)};
+      return {type: 'Array', length: value.length,
+        values: value.slice(0, value.length <= 128 ? 128 : 12).map(summary),
+        truncated: value.length > 128};
     }
     if (value instanceof Promise) return {type: 'Promise'};
     let name = 'Object';
@@ -160,11 +181,13 @@
   method(root, 'matchMedia', 'Window.matchMedia', ([query], result) => ({
     query: String(query).slice(0, 200), matches: !!result?.matches,
   }));
-  method(root, 'getComputedStyle', 'Window.getComputedStyle', ([el, pseudo]) => ({
+  method(root, 'getComputedStyle', 'Window.getComputedStyle', ([el, pseudo], result) => ({
     element: el?.tagName ?? null, pseudo: pseudo ?? null,
+    propertyCount: result?.length ?? null,
   }));
-  method(prototype('Document'), 'querySelector', 'Document.querySelector', ([selector]) => ({
+  method(prototype('Document'), 'querySelector', 'Document.querySelector', ([selector], result) => ({
     selector: String(selector).slice(0, 160),
+    found: result !== null, resultTag: result?.tagName ?? null,
   }));
   method(prototype('Document'), 'createElement', 'Document.createElement', ([tag]) => ({
     tag: String(tag),
@@ -181,7 +204,8 @@
     font: String(font).slice(0, 160), textLength: String(text ?? '').length,
   }));
   method(prototype('CanvasRenderingContext2D'), 'measureText', 'Canvas2D.measureText', ([text], result, self) => ({
-    textLength: String(text).length, textSample: String(text).slice(0, 40),
+    textLength: String(text).length, textSampleHash: shortHash(String(text)),
+    ...(settings.recordTextSamples ? {textSample: String(text).slice(0, 40)} : {}),
     font: String(self.font).slice(0, 180), width: result?.width,
   }));
 
@@ -191,12 +215,14 @@
   }));
   method(prototype('HTMLCanvasElement'), 'toDataURL', 'Canvas.toDataURL', ([type], result) => ({
     mime: type ?? 'image/png', resultLength: result?.length ?? null,
+    sampleHash: typeof result === 'string' ? shortHash(result) : undefined,
   }));
   method(prototype('HTMLCanvasElement'), 'toBlob', 'Canvas.toBlob', ([, type]) => ({
     mime: type ?? 'image/png',
   }));
   method(prototype('CanvasRenderingContext2D'), 'getImageData', 'Canvas2D.getImageData', ([x, y, w, h], result) => ({
     x, y, width: w, height: h, dataLength: result?.data?.length,
+    sampleHash: result?.data ? shortHash(result.data) : undefined,
   }));
   for (const name of ['WebGLRenderingContext', 'WebGL2RenderingContext']) {
     const proto = prototype(name);
@@ -243,25 +269,97 @@
   }
 
   // Keep a few fresh SDK tokens only in this closure to match them against
-  // subsequent request HEADER values. Never put the token in the exported log.
-  function rememberToken(token) {
+  // subsequent request headers or inspectable string bodies. Never export values.
+  function rememberToken(token, callId, label, durationMs) {
     if (typeof token !== 'string' || token.length === 0) return;
-    latestTokens.unshift(token);
+    latestTokens.unshift({value: token, callId});
     if (latestTokens.length > 5) latestTokens.length = 5;
-    emit('SDK.token.resolved', {length: token.length});
+    emit('SDK.token.resolved', {callId, label, length: token.length, durationMs});
+  }
+
+  function matchingTokenCallIds(text) {
+    if (typeof text !== 'string') return [];
+    return latestTokens.filter(item => text.includes(item.value)).map(item => item.callId);
   }
 
   function headerInfo(headers) {
     const names = [];
     const tokenHeaderNames = [];
-    if (!headers) return {names, tokenHeaderNames};
+    const tokenCallIds = new Set();
+    if (!headers) return {names, tokenHeaderNames, tokenCallIds: []};
     try {
       new Headers(headers).forEach((value, name) => {
         names.push(name);
-        if (latestTokens.some(t => value.includes(t))) tokenHeaderNames.push(name);
+        const hits = matchingTokenCallIds(value);
+        if (hits.length) tokenHeaderNames.push(name);
+        hits.forEach(id => tokenCallIds.add(id));
       });
     } catch {}
-    return {names, tokenHeaderNames};
+    return {names, tokenHeaderNames, tokenCallIds: [...tokenCallIds]};
+  }
+
+  function bodyInfo(body) {
+    const base = {bodyKind: 'none', bodyTokenMatch: false,
+      bodyTokenCallIds: [], bodyFieldPaths: []};
+    if (body == null) return base;
+    if (!settings.inspectStringRequestBodies) return {...base, bodyKind: 'uninspected'};
+    let value;
+    let bodyKind;
+    const paths = [];
+    const fieldCallIds = new Set();
+    try {
+      if (typeof body === 'string') {
+        bodyKind = 'string';
+        value = body;
+      } else if (typeof root.URLSearchParams === 'function' && body instanceof root.URLSearchParams) {
+        bodyKind = 'URLSearchParams';
+        value = body.toString();
+        for (const [name, fieldValue] of body) {
+          const hits = matchingTokenCallIds(fieldValue);
+          if (hits.length) paths.push(String(name).slice(0, 80));
+          hits.forEach(id => fieldCallIds.add(id));
+        }
+      } else if (typeof root.FormData === 'function' && body instanceof root.FormData) {
+        bodyKind = 'FormData';
+        const ids = new Set();
+        for (const [name, fieldValue] of body) {
+          if (typeof fieldValue !== 'string') continue;
+          const hits = matchingTokenCallIds(fieldValue);
+          if (hits.length) paths.push(String(name).slice(0, 80));
+          hits.forEach(id => ids.add(id));
+        }
+        return {...base, bodyKind, bodyTokenMatch: ids.size > 0,
+          bodyTokenCallIds: [...ids], bodyFieldPaths: paths.slice(0, 30)};
+      } else {
+        return {...base, bodyKind: body?.constructor?.name ?? 'uninspected'};
+      }
+      const ids = [...new Set([...matchingTokenCallIds(value), ...fieldCallIds])];
+      if (ids.length && bodyKind === 'string' && value.length <= settings.maxJsonBodyInspectionBytes) {
+        try {
+          const parsed = JSON.parse(value);
+          const seen = new WeakSet();
+          let visited = 0;
+          const walk = (node, path, depth) => {
+            if (++visited > 1000 || depth > 8 || paths.length >= 30) return;
+            if (typeof node === 'string') {
+              if (matchingTokenCallIds(node).length) paths.push(path || '$');
+            } else if (node && typeof node === 'object' && !seen.has(node)) {
+              seen.add(node);
+              for (const [key, fieldValue] of Object.entries(node)) {
+                const safeKey = /^[A-Za-z_$][\w$-]{0,80}$/.test(key) ? key : '[key]';
+                walk(fieldValue, `${path}.${safeKey}`, depth + 1);
+              }
+            }
+          };
+          walk(parsed, '$', 0);
+        } catch {}
+      }
+      return {...base, bodyKind, bodyLength: value.length,
+        bodyTokenMatch: ids.length > 0, bodyTokenCallIds: ids,
+        bodyFieldPaths: paths.slice(0, 30)};
+    } catch {
+      return {...base, bodyKind: 'inspection-error'};
+    }
   }
 
   function safeURL(input) {
@@ -271,8 +369,8 @@
     } catch { return '[invalid URL]'; }
   }
 
-  // Network observation: HTTP code + method + path + header NAMES only.
-  // No request bodies, cookies, authorization values or response contents.
+  // Network observation: HTTP code, path, header names, and body token-presence.
+  // No bodies, cookies, authorization values, or response contents are exported.
   const fetchDescriptor = Object.getOwnPropertyDescriptor(root, 'fetch');
   if (typeof fetchDescriptor?.value === 'function') {
     const originalFetch = fetchDescriptor.value;
@@ -283,9 +381,11 @@
       const methodName = String(init?.method ?? input?.method ?? 'GET').toUpperCase();
       const href = safeURL(input?.url ?? input);
       const headers = headerInfo(init?.headers ?? input?.headers);
+      const body = bodyInfo(init?.body);
       requests.set(id, {id, transport: 'fetch', method: methodName, url: href,
-        headerNames: headers.names, tokenHeaderNames: headers.tokenHeaderNames});
-      emit('fetch.start', {id, method: methodName, url: href, ...headers});
+        headerNames: headers.names, tokenHeaderNames: headers.tokenHeaderNames,
+        tokenCallIds: headers.tokenCallIds, ...body});
+      emit('fetch.start', {id, method: methodName, url: href, ...headers, ...body});
       let result;
       try { result = Reflect.apply(originalFetch, this, args); }
       catch (error) {
@@ -319,7 +419,7 @@
     const [methodName, url] = args;
     xhrState.set(this, {id: ++requestSeq, transport: 'xhr',
       method: String(methodName).toUpperCase(), url: safeURL(url),
-      headerNames: [], tokenHeaderNames: []});
+      headerNames: [], tokenHeaderNames: [], tokenCallIds: []});
     return Reflect.apply(original, this, args);
   });
   patchXhr('setRequestHeader', function (original, args) {
@@ -328,13 +428,16 @@
       const [name, value] = args;
       const lower = String(name).toLowerCase();
       state.headerNames.push(lower);
-      if (latestTokens.some(t => String(value).includes(t))) state.tokenHeaderNames.push(lower);
+      const hits = matchingTokenCallIds(String(value));
+      if (hits.length) state.tokenHeaderNames.push(lower);
+      state.tokenCallIds.push(...hits);
     }
     return Reflect.apply(original, this, args);
   });
   patchXhr('send', function (original, args) {
     const state = xhrState.get(this);
     if (state) {
+      Object.assign(state, bodyInfo(args[0]));
       requests.set(state.id, state);
       emit('xhr.start', {...state});
       // Native addEventListener avoids a redundant trace event.
@@ -353,6 +456,7 @@
       return {ok: false, reason: 'Expected a configured SDK object'};
     }
     let count = 0;
+    let already = 0;
     for (const key of ['configure', 'createRequestToken']) {
       let owner = sdk;
       while (owner && !Object.getOwnPropertyDescriptor(owner, key)) {
@@ -360,29 +464,49 @@
       }
       const desc = owner && Object.getOwnPropertyDescriptor(owner, key);
       if (!owner || typeof desc?.value !== 'function') continue;
+      let watched = watchedMethods.get(owner);
+      if (!watched) {
+        watched = new Set();
+        watchedMethods.set(owner, watched);
+      }
+      if (watched.has(key)) {
+        already++;
+        continue;
+      }
       const original = desc.value;
       if (patchDescriptor(owner, key, {...desc, value: function (...args) {
-        emit(`SDK.${key}.start`, {label, argumentCount: args.length});
+        const callId = ++sdkCallSeq;
+        const beganAt = nativeNow();
+        emit(`SDK.${key}.start`, {callId, label, argumentCount: args.length});
         let result;
         try { result = Reflect.apply(original, this, args); }
         catch (error) {
-          emit(`SDK.${key}.throw`, {label, errorName: error?.name ?? 'Error'});
+          emit(`SDK.${key}.throw`, {callId, label, errorName: error?.name ?? 'Error'});
           throw error;
         }
         Promise.resolve(result).then(value => {
-          if (key === 'createRequestToken') rememberToken(value);
-          else {
-            emit('SDK.configure.resolved', {label, result: summary(value)});
+          const durationMs = Math.round((nativeNow() - beganAt) * 100) / 100;
+          if (key === 'createRequestToken') {
+            emit('SDK.createRequestToken.resolved', {callId, label, durationMs,
+              valueType: typeof value, tokenLength: typeof value === 'string' ? value.length : null});
+            rememberToken(value, callId, label, durationMs);
+          } else {
+            emit('SDK.configure.resolved', {callId, label, durationMs, result: summary(value)});
             if (value && value !== sdk) watchSdk(value, `${label}.configured`);
           }
         }, error => {
-          emit(`SDK.${key}.reject`, {label, errorName: error?.name ?? 'Error'});
+          emit(`SDK.${key}.reject`, {callId, label,
+            durationMs: Math.round((nativeNow() - beganAt) * 100) / 100,
+            errorName: error?.name ?? 'Error'});
         });
         return result;
-      }})) count++;
+      }})) {
+        watched.add(key);
+        count++;
+      }
     }
-    emit('observer.watchSdk', {label, patchedMethods: count});
-    return {ok: count > 0, patchedMethods: count};
+    emit('observer.watchSdk', {label, patchedMethods: count, alreadyPatchedMethods: already});
+    return {ok: count + already > 0, patchedMethods: count, alreadyPatchedMethods: already};
   }
 
   function mark(label, extra = {}) {
@@ -446,7 +570,7 @@
 
   function status() {
     return {
-      version: '0.1.0', active, started, eventCount: events.length, dropped,
+      version: '0.2.0', active, started, eventCount: events.length, dropped,
       installedPatches: patches.length,
       counts: Object.fromEntries([...counters].sort((a, b) => b[1] - a[1])),
       tokenCountInMemory: latestTokens.length,
@@ -484,7 +608,7 @@
   }
 
   Object.defineProperty(root, '__castleObserver', {
-    configurable: true, value: Object.freeze({version: '0.1.0', settings, mark,
+    configurable: true, value: Object.freeze({version: '0.2.0', settings, mark,
       watchSdk, snapshotEnvironment, status, jsonl, download, stop}),
   });
   emit('observer.ready', {origin: root.location?.origin ?? null});
